@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EggPoint 3D Model</title>
+<style>
+  :root {
+    --bg: #eef1f4; --panel: #ffffff; --text: #1d2329; --muted: #5b6670; --line: #d5dbe0;
+    --accent: #b97800; --ok: #1f8a4c; --bad: #c0392b; --scene: #e6eaee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15191d; --panel: #1f252b; --text: #e6eaee; --muted: #9aa5af; --line: #333c45;
+      --accent: #f0b429; --ok: #4cc38a; --bad: #ff6b5e; --scene: #2b3137;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15191d; --panel: #1f252b; --text: #e6eaee; --muted: #9aa5af; --line: #333c45;
+    --accent: #f0b429; --ok: #4cc38a; --bad: #ff6b5e; --scene: #2b3137;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, "Segoe UI", Roboto, Arial, sans-serif; }
+  #view { position: fixed; inset: 0; }
+  #ui { position: fixed; top: 16px; left: 16px; width: 300px; max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .15); }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .muted { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  label { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+  input[type=range], select { width: 100%; accent-color: var(--accent); }
+  select { margin-top: 4px; padding: 4px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  .row { display: flex; gap: 16px; }
+  .row label { justify-content: flex-start; }
+  .views { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 12px; }
+  .views button { padding: 6px 0; border: 1px solid var(--line); border-radius: 6px; background: transparent;
+    color: var(--text); cursor: pointer; font: inherit; }
+  .views button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #111; }
+  details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+  summary { cursor: pointer; font-weight: 600; }
+  ul { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; }
+  li { margin: 3px 0; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  output { font-variant-numeric: tabular-nums; color: var(--muted); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<aside id="ui">
+  <h1>EggPoint 3D</h1>
+  <p class="muted">Drag to orbit, scroll to zoom, right-drag to pan. Sizes in mm.</p>
+
+  <label for="drawer">Drawer <output id="drawerOut">0 mm</output></label>
+  <input id="drawer" type="range" min="0" max="100" value="0">
+  <label for="flip">Flip toward you <output id="flipOut">0°</output></label>
+  <input id="flip" type="range" min="0" max="180" value="0" disabled>
+  <p id="hint" class="muted"></p>
+
+  <div class="row">
+    <label><input id="lid" type="checkbox"> Lid tray</label>
+    <label><input id="leds" type="checkbox" checked> LEDs on</label>
+  </div>
+
+  <label for="panels">Black acrylic panels</label>
+  <select id="panels">
+    <option value="ghost" selected>See-through</option>
+    <option value="solid">Solid</option>
+    <option value="hidden">Hidden</option>
+  </select>
+
+  <div class="views" role="group" aria-label="View">
+    <button data-view="iso">3D</button><button data-view="front">Front</button>
+    <button data-view="side">Side</button><button data-view="top">Top</button>
+    <button data-view="camera" style="grid-column: 1 / -1">Camera close-up</button>
+  </div>
+  <div class="row"><label><input id="unitOnly" type="checkbox"> Raspberry Pi casing only (isolated)</label></div>
+  <div class="views"><button id="save" style="grid-column: 1 / -1">Save PNG (for slides)</button></div>
+
+  <details open>
+    <summary>Specs &amp; checks</summary>
+    <ul id="specs"></ul>
+    <ul id="checks"></ul>
+  </details>
+</aside>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- dimensions (mm) ----------
+const A = 38.1, T = 2;              // 1½" x 1½" slotted angle (bought), ~14 gauge
+const P = 3;                        // black acrylic panels
+const W = 470, D = 420, H = 600;    // frame outer size
+const TRAY = 290, TRAY_H = 50;      // standard plastic 30-egg tray; TRAY_H is assumed, measure yours
+const COLS = 6, ROWS = 5;
+const LEDGE = 3;                    // ledge in the tray frame the tray rests on
+const STACK = LEDGE + 2 * TRAY_H;   // tray + lid tray, rim to rim
+const BASE_TOP = STACK;             // pivot height = stack height, so the flipped stack lands on the table
+const SLIDE_L = 350, SLIDE_H = 45, SLIDE_T = 12.7; // 14" full-extension ball-bearing slides
+const DRW_W = 330, DRW_Y0 = BASE_TOP - SLIDE_H;
+const FRONT_Z = D / 2;              // frame front; front panel sits outside it
+const DRW_Z1 = FRONT_Z + P, DRW_Z0 = DRW_Z1 - SLIDE_L, DRW_ZC = (DRW_Z0 + DRW_Z1) / 2;
+const HINGE_Z = DRW_Z1 + P;         // outer face of drawer face / lip plate
+const OPEN_W = DRW_W + 2 * SLIDE_T + 12;   // drawer + slides + 6 mm clearance each side
+const OPEN_Y0 = DRW_Y0 - 3, OPEN_Y1 = BASE_TOP + STACK + 3;
+const WALL = 5, POCKET_IN = TRAY + 2, POCKET = POCKET_IN + 2 * WALL;
+const TRAY_ZL = -P - WALL - POCKET_IN / 2;   // tray centre in pivot coordinates
+const TRAY_Z = HINGE_Z + TRAY_ZL;            // tray centre with drawer closed: camera sits above it
+const CAM_VFOV = 41.41, CAM_HFOV = 53.5;     // Camera Module v1 (OV5647)
+const CAM_BOARD_Y = H - 3 * T - 18, CAM_LENS_Y = CAM_BOARD_Y - 7;
+const HT = H + P;                            // roof top
+const HW = 210, HF = 70, HB = 70, HS = 92;   // display unit: width, front/back from centre, 45° face rise
+// Official 7" display, Raspberry Pi drawing RP-008246-DS-1. Front view, origin at lens centre, +x right, +y up.
+const LENS_W = 192.96, LENS_H = 110.76, LENS_T = 0.7, MODULE_T = 5.96;
+const AA = { w: 154.08, h: 85.92, y: 1.01 };                 // active area
+const FRAME_D = { w: 164.9, h: 100.6, x: 1.49, y: -1.55 };   // metal back frame
+const M3_HOLES = [[63.94, 33.8], [-62.26, 33.8], [63.94, -31.85], [-62.26, -31.85]]; // 4 x M3, 126.2 x 65.65 c-c
+const PI_C = [6.49, 3.45];                                    // centre of the 4 x M2.5 Pi holes (58 x 49)
+const LUG_H = 3.5;   // shortcut: lug height read off the drawing's side view (not dimensioned); measure before cutting
+const FAN = 60, FAN_T = 10, FAN_HOLES = 50;                   // 60 mm fan = 50 mm between holes; 10 mm thick assumed
+const RIBBON_EST = (HT - CAM_BOARD_Y) + 90;  // + ~90 mm inside the display unit (estimate)
+const LAYOUT = 'QQQQ--QQQQ--QQDDQQDDDDQQQQQ---'; // eggs as in the dashboard mock-up: Q quail, D duck
+
+// ---------- materials ----------
+const std = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.5, ...o });
+const M = {
+  steel: std(0xb3bac0, { metalness: 0.55, roughness: 0.45 }),
+  hole: new THREE.MeshBasicMaterial({ color: 0x16191c }),
+  panel: std(0x0d0e10, { roughness: 0.25, transparent: true }),
+  black: std(0x17191b, { roughness: 0.4 }),
+  foam: std(0x2b2d30, { roughness: 0.9 }),
+  tray: std(0xf1eee6, { transparent: true, opacity: 0.88, side: THREE.DoubleSide }),
+  duck: std(0xe6e2d0, { roughness: 0.6 }),
+  quail: std(0xd6bf94, { roughness: 0.6 }),
+  star: std(0xd5d9dc, { metalness: 0.6, roughness: 0.35 }),
+  brass: std(0xc8a24a, { metalness: 0.6, roughness: 0.35 }),
+  led: std(0xfff4d6, { emissive: 0xffe2a0, emissiveIntensity: 0 }),
+  res: std(0xf0efe9, { roughness: 0.8 }),
+  pcb: std(0x1f6b3a),
+  screen: std(0x0f2236, { emissive: 0x16365a, emissiveIntensity: 0.9, roughness: 0.2 }),
+  ribbon: std(0xd7c59a, { side: THREE.DoubleSide }),
+  glass: std(0x101820, { metalness: 0.3, roughness: 0.1 }),
+  table: std(0xd9c6a5, { roughness: 0.85 }),
+};
+
+// ---------- helpers ----------
+const add = (...v) => v.reduce((s, q) => s.map((c, i) => c + q[i]));
+const mul = (v, k) => v.map(c => c * k);
+const abs = v => v.map(Math.abs);
+const rad = THREE.MathUtils.degToRad;
+function box(parent, size, pos, m) {
+  const o = new THREE.Mesh(new THREE.BoxGeometry(...size), m);
+  o.position.set(...pos); parent.add(o); return o;
+}
+const slab = (parent, [x0, x1], [y0, y1], [z0, z1], m) =>
+  box(parent, [x1 - x0, y1 - y0, z1 - z0], [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2], m);
+const X = (sx, a, b) => sx > 0 ? [a, b] : [-b, -a];   // mirror an x-range to the left side
+function cyl(parent, r, h, pos, axis, m) {
+  const o = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 24), m);
+  if (axis === 'x') o.rotation.z = Math.PI / 2;
+  if (axis === 'z') o.rotation.x = Math.PI / 2;
+  o.position.set(...pos); parent.add(o); return o;
+}
+// flat plate in XZ from y = 0 to t; holes: [x, z] or [x, z, radius] round, [x, z, w, d] rectangular
+function holedPlate(w, d, t, holes, r, m) {
+  const s = new THREE.Shape();
+  s.moveTo(-w / 2, -d / 2); s.lineTo(w / 2, -d / 2); s.lineTo(w / 2, d / 2); s.lineTo(-w / 2, d / 2); s.closePath();
+  for (const [x, z, a = r, b] of holes) {
+    const h = new THREE.Path();
+    if (b === undefined) h.absarc(x, -z, a, 0, Math.PI * 2, true);
+    else { h.moveTo(x - a / 2, -z - b / 2); h.lineTo(x - a / 2, -z + b / 2); h.lineTo(x + a / 2, -z + b / 2); h.lineTo(x + a / 2, -z - b / 2); h.closePath(); }
+    s.holes.push(h);
+  }
+  const g = new THREE.ExtrudeGeometry(s, { depth: t, bevelEnabled: false, curveSegments: 18 });
+  g.rotateX(-Math.PI / 2);
+  return new THREE.Mesh(g, m);
+}
+const cups = [];
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++)
+  cups.push([-TRAY / 2 + (c + 0.5) * TRAY / COLS, -TRAY / 2 + (r + 0.5) * TRAY / ROWS]);
+
+// ---------- scene graph ----------
+const scene = new THREE.Scene();
+const machine = new THREE.Group(), unit = new THREE.Group();   // unit = display casing on the roof
+const frame = new THREE.Group(), panels = new THREE.Group();
+const drawer = new THREE.Group(), slideMid = new THREE.Group(), pivot = new THREE.Group();
+scene.add(machine, unit);
+machine.add(frame, panels, drawer, slideMid);
+pivot.position.set(0, BASE_TOP, HINGE_Z);
+drawer.add(pivot);
+
+// ---------- slotted angle frame ----------
+const slots = [], bars = [];
+// corner line starts at o and runs along dir; legs extend toward a and b
+function angleBar(o, dir, L, a, b) {
+  bars.push(L);
+  for (const [leg, th] of [[a, b], [b, a]]) {
+    box(frame, add(mul(abs(dir), L), mul(abs(leg), A), mul(abs(th), T)),
+        add(o, mul(dir, L / 2), mul(leg, A / 2), mul(th, T / 2)), M.steel);
+    for (let s = 25; s <= L - 25; s += 38)
+      slots.push([add(o, mul(dir, s), mul(leg, A * 0.58), mul(th, T / 2)),
+                  add(mul(abs(dir), 22), mul(abs(leg), 8), mul(abs(th), T + 0.6))]);
+  }
+}
+for (const sx of [-1, 1]) for (const sz of [-1, 1])
+  angleBar([sx * W / 2, 0, sz * D / 2], [0, 1, 0], H, [-sx, 0, 0], [0, 0, -sz]);        // posts
+for (const sz of [-1, 1]) {
+  angleBar([-W / 2 + T, 0, sz * (D / 2 - T)], [1, 0, 0], W - 2 * T, [0, 1, 0], [0, 0, -sz]);   // front/back bottom
+  angleBar([-W / 2 + T, H, sz * (D / 2 - T)], [1, 0, 0], W - 2 * T, [0, -1, 0], [0, 0, -sz]);  // front/back top
+}
+for (const sx of [-1, 1]) {
+  angleBar([sx * (W / 2 - T), T, -D / 2 + 2 * T], [0, 0, 1], D - 4 * T, [0, 1, 0], [-sx, 0, 0]);       // side bottom
+  angleBar([sx * (W / 2 - T), H - T, -D / 2 + 2 * T], [0, 0, 1], D - 4 * T, [0, -1, 0], [-sx, 0, 0]);  // side top
+  angleBar([sx * (W / 2 - T), OPEN_Y0, -D / 2 + 2 * T], [0, 0, 1], D - 4 * T, [0, 1, 0], [-sx, 0, 0]); // slide rail
+}
+angleBar([-W / 2 + 2 * T, H - 2 * T, TRAY_Z - 25], [1, 0, 0], W - 4 * T, [0, -1, 0], [0, 0, 1]);      // camera cross bar
+{
+  const im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M.hole, slots.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), s = new THREE.Vector3();
+  slots.forEach(([c, sz], i) => im.setMatrixAt(i, m4.compose(v.set(...c), q, s.set(...sz))));
+  frame.add(im);
+}
+
+// ---------- black acrylic panels (front has the drawer opening) ----------
+slab(panels, [-W / 2 - P, -W / 2], [0, H], [-D / 2, D / 2], M.panel);
+slab(panels, [W / 2, W / 2 + P], [0, H], [-D / 2, D / 2], M.panel);
+slab(panels, [-W / 2 - P, W / 2 + P], [0, H], [-D / 2 - P, -D / 2], M.panel);
+slab(panels, [-W / 2 - P, W / 2 + P], [H, HT], [-D / 2 - P, D / 2 + P], M.panel);
+slab(panels, [-W / 2 - P, -OPEN_W / 2], [0, H], [FRONT_Z, FRONT_Z + P], M.panel);
+slab(panels, [OPEN_W / 2, W / 2 + P], [0, H], [FRONT_Z, FRONT_Z + P], M.panel);
+slab(panels, [-OPEN_W / 2, OPEN_W / 2], [0, OPEN_Y0], [FRONT_Z, FRONT_Z + P], M.panel);
+slab(panels, [-OPEN_W / 2, OPEN_W / 2], [OPEN_Y1, H], [FRONT_Z, FRONT_Z + P], M.panel);
+// foam strip seals the gap above the tray frame (anything taller would hit the table when flipped)
+slab(machine, [-OPEN_W / 2, OPEN_W / 2], [BASE_TOP + STACK, OPEN_Y1 + 8], [FRONT_Z + P, FRONT_Z + 2 * P], M.foam);
+// LED / power cable leaves through a grommet to the relay + 12 V supply outside
+{
+  const g = new THREE.Mesh(new THREE.TorusGeometry(9, 3, 10, 24), M.black);
+  g.position.set(0, 80, -D / 2 - P); machine.add(g);
+  cyl(machine, 4, 80, [0, 80, -D / 2 - P - 35], 'z', M.black);
+}
+
+// ---------- drawer slides on spacer bars ----------
+for (const sx of [-1, 1]) {
+  slab(machine, X(sx, DRW_W / 2 + SLIDE_T, W / 2 - 2 * T), [DRW_Y0, BASE_TOP], [DRW_Z0 - 4, FRONT_Z - 4], M.black);   // spacer
+  slab(machine, X(sx, DRW_W / 2 + 7.7, DRW_W / 2 + SLIDE_T), [DRW_Y0, BASE_TOP], [DRW_Z0 - 4, FRONT_Z - 1], M.steel); // outer member
+  slab(slideMid, X(sx, DRW_W / 2 + 4.1, DRW_W / 2 + 7.6), [DRW_Y0 + 3, BASE_TOP - 3], [DRW_Z0 - 4, FRONT_Z - 1], M.steel);
+  slab(drawer, X(sx, DRW_W / 2, DRW_W / 2 + 4), [DRW_Y0 + 6, BASE_TOP - 6], [DRW_Z0, DRW_Z1], M.steel);            // inner member
+}
+
+// ---------- drawer: LED base box ----------
+slab(drawer, [-DRW_W / 2, DRW_W / 2], [DRW_Y0, DRW_Y0 + 3], [DRW_Z0, DRW_Z1], M.black);
+for (const sx of [-1, 1]) slab(drawer, X(sx, DRW_W / 2 - 3, DRW_W / 2), [DRW_Y0 + 3, BASE_TOP - 3], [DRW_Z0, DRW_Z1], M.black);
+slab(drawer, [-DRW_W / 2 + 3, DRW_W / 2 - 3], [DRW_Y0 + 3, BASE_TOP - 3], [DRW_Z0, DRW_Z0 + 3], M.black);
+slab(drawer, [-DRW_W / 2 + 3, DRW_W / 2 - 3], [DRW_Y0 + 3, BASE_TOP - 3], [DRW_Z1 - 3, DRW_Z1], M.black);
+const ledXZ = cups.map(([x, z]) => [x, TRAY_Z + z]);
+{
+  const top = holedPlate(DRW_W, SLIDE_L, 3, ledXZ.map(([x, z]) => [x, z - DRW_ZC]), 6, M.black);
+  top.position.set(0, BASE_TOP - 3, DRW_ZC); drawer.add(top);
+  const starGeo = new THREE.CylinderGeometry(10, 10, 1.6, 6), ledGeo = new THREE.CylinderGeometry(3.5, 3.5, 2.6, 16);
+  for (const [x, z] of ledXZ) {            // 3 W star LED under every cup
+    const s = new THREE.Mesh(starGeo, M.star); s.position.set(x, BASE_TOP - 3.8, z); drawer.add(s);
+    const l = new THREE.Mesh(ledGeo, M.led); l.position.set(x, BASE_TOP - 1.7, z); drawer.add(l);
+  }
+  for (let i = 0; i < 10; i++)             // 6.8 ohm 5 W resistors, one per 3-LED string
+    slab(drawer, [-148.5 + i * 33 - 11, -148.5 + i * 33 + 11], [BASE_TOP, BASE_TOP + 9], [DRW_Z0 + 18, DRW_Z0 + 28], M.res);
+}
+const FACE_X = OPEN_W / 2 + 45, LIP_X = OPEN_W / 2 + 15;
+slab(drawer, [-FACE_X, FACE_X], [OPEN_Y0 - 12, BASE_TOP], [DRW_Z1, HINGE_Z], M.black);       // drawer face (lower)
+for (const sx of [-1, 1]) {
+  cyl(drawer, 8, 18, [sx * (FACE_X - 15), (OPEN_Y0 - 12 + BASE_TOP) / 2, HINGE_Z + 9], 'z', M.steel); // pull knobs, outside the lip's swing
+  cyl(drawer, 5, 30, [sx * 150, BASE_TOP, HINGE_Z], 'x', M.steel);                                   // pivot hinges
+}
+
+// ---------- tray frame: flips toward the user about the pivot ----------
+slab(pivot, [-LIP_X, LIP_X], [0, STACK], [-P, 0], M.black);                 // lip plate (upper drawer face)
+slab(pivot, [-50, 50], [STACK - 22, STACK - 10], [0, 14], M.steel);         // flip handle
+{
+  const PZ0 = -P - POCKET, PZ1 = -P, PX = POCKET / 2, IX = POCKET_IN / 2, L8 = 8;
+  slab(pivot, [-PX, PX], [0, STACK], [PZ1 - WALL, PZ1], M.black);
+  slab(pivot, [-PX, PX], [0, STACK], [PZ0, PZ0 + WALL], M.black);
+  for (const sx of [-1, 1]) slab(pivot, X(sx, PX - WALL, PX), [0, STACK], [PZ0 + WALL, PZ1 - WALL], M.black);
+  // 8 mm ledge keeps the tray in the frame while flipping; stays clear of the LEDs
+  slab(pivot, [-IX, IX], [0, LEDGE], [PZ1 - WALL - L8, PZ1 - WALL], M.black);
+  slab(pivot, [-IX, IX], [0, LEDGE], [PZ0 + WALL, PZ0 + WALL + L8], M.black);
+  for (const sx of [-1, 1]) slab(pivot, X(sx, IX - L8, IX), [0, LEDGE], [PZ0 + WALL + L8, PZ1 - WALL - L8], M.black);
+}
+function makeTray() {
+  const g = new THREE.Group();
+  const rim = holedPlate(TRAY, TRAY, 2, cups, 22, M.tray); rim.position.y = TRAY_H - 2; g.add(rim);
+  const cupGeo = new THREE.CylinderGeometry(22, 12, TRAY_H - 2, 20, 1, true);
+  for (const [x, z] of cups) { const c = new THREE.Mesh(cupGeo, M.tray); c.position.set(x, (TRAY_H - 2) / 2, z); g.add(c); }
+  return g;
+}
+const tray = makeTray(); tray.position.set(0, LEDGE, TRAY_ZL); pivot.add(tray);
+const lid = makeTray(); lid.rotation.x = Math.PI; lid.position.set(0, LEDGE + 2 * TRAY_H, TRAY_ZL); pivot.add(lid);
+{
+  const eggGeo = new THREE.SphereGeometry(1, 24, 16);
+  [...LAYOUT].forEach((k, i) => {
+    if (k === '-') return;
+    const duck = k === 'D', [rx, ry] = duck ? [21.5, 31] : [12.5, 17];
+    const e = new THREE.Mesh(eggGeo, duck ? M.duck : M.quail);
+    e.scale.set(rx, ry, rx);
+    e.position.set(cups[i][0], LEDGE + (duck ? 12 : 3) + ry, TRAY_ZL + cups[i][1]);
+    pivot.add(e);
+  });
+}
+
+// ---------- camera module v1 on the cross bar, ribbon up to the Pi ----------
+slab(machine, [-14, 14], [CAM_BOARD_Y + 1, H - 3 * T], [TRAY_Z + 12, TRAY_Z + 15], M.black);   // bracket
+slab(machine, [-12.5, 12.5], [CAM_BOARD_Y, CAM_BOARD_Y + 1], [TRAY_Z - 12, TRAY_Z + 12], M.pcb);
+slab(machine, [-4, 4], [CAM_LENS_Y + 1, CAM_BOARD_Y], [TRAY_Z - 4, TRAY_Z + 4], M.black);
+cyl(machine, 3, 1, [0, CAM_LENS_Y + 0.5, TRAY_Z], 'y', M.glass);
+slab(machine, [-8, 8], [CAM_BOARD_Y + 1, HT + 35], [TRAY_Z - 12.4, TRAY_Z - 12], M.ribbon);
+
+// ---------- display unit on the roof: black acrylic casing, 7" display on its 4 M3 holes, Pi 4B, 60 mm fan ----------
+unit.position.set(0, HT, TRAY_Z);          // local: x across, y up, z toward the user
+let piFits = false;
+{
+  const WI = HW - 2 * P;                   // plates sit between the two side plates
+  // side plates: the 45° profile, with inlet vent slots low at the front
+  const prof = new THREE.Shape();
+  prof.moveTo(HF, 0); prof.lineTo(HF - HS, HS); prof.lineTo(-HB, HS); prof.lineTo(-HB, 0); prof.closePath();
+  for (const v of [12, 20, 28]) {
+    const h = new THREE.Path(); h.moveTo(-4, v); h.lineTo(26, v); h.lineTo(26, v + 4); h.lineTo(-4, v + 4); h.closePath();
+    prof.holes.push(h);
+  }
+  for (const sx of [-1, 1]) {
+    const g = new THREE.ExtrudeGeometry(prof, { depth: P, bevelEnabled: false });
+    g.rotateY(-Math.PI / 2); g.translate(sx > 0 ? HW / 2 : -HW / 2 + P, 0, 0);
+    unit.add(new THREE.Mesh(g, M.panel));
+  }
+  // bottom plate with the camera-ribbon slot, top plate, back plate with fan + cable holes
+  unit.add(holedPlate(WI, HF + HB, P, [[0, -12.2, 20, 5]], 0, M.panel));
+  slab(unit, [-WI / 2, WI / 2], [HS - P, HS], [-HB, HF - HS], M.panel);
+  const fanY = HS / 2, fh = FAN_HOLES / 2;
+  const back = holedPlate(WI, HS - 2 * P, P,
+    [[0, 0, FAN / 2 - 2], [fh, fh, 1.7], [-fh, fh, 1.7], [fh, -fh, 1.7], [-fh, -fh, 1.7], [-75, fanY - 25, 6]], 0, M.panel);
+  back.rotation.x = Math.PI / 2; back.position.set(0, fanY, -HB); unit.add(back);
+  // 60 mm fan on the inside of the back plate, blowing out; 4 screws on the 50 mm square
+  const fanZ = -HB + P + FAN_T / 2;
+  slab(unit, [-FAN / 2, FAN / 2], [fanY - FAN / 2, fanY + FAN / 2], [-HB + P, -HB + P + FAN_T], M.black);
+  cyl(unit, FAN / 2 - 3, FAN_T + 0.4, [0, fanY, fanZ], 'z', M.foam);
+  cyl(unit, 11, FAN_T + 0.8, [0, fanY, fanZ], 'z', M.black);
+  for (const [x, y] of [[fh, fh], [-fh, fh], [fh, -fh], [-fh, -fh]]) cyl(unit, 1.5, FAN_T + P + 6, [x, fanY + y, fanZ - 1], 'z', M.steel);
+
+  // display group: origin at the lens front centre, +y up the slant, +z out of the screen
+  const disp = new THREE.Group();
+  disp.rotation.x = -Math.PI / 4;
+  disp.position.set(0, HS / 2, HF - HS / 2).addScaledVector(new THREE.Vector3(0, Math.SQRT1_2, Math.SQRT1_2), MODULE_T + LUG_H);
+  unit.add(disp);
+  slab(disp, [-LENS_W / 2, LENS_W / 2], [-LENS_H / 2, LENS_H / 2], [-LENS_T, 0], M.glass);
+  slab(disp, [-AA.w / 2, AA.w / 2], [AA.y - AA.h / 2, AA.y + AA.h / 2], [0, 0.3], M.screen);
+  slab(disp, [FRAME_D.x - FRAME_D.w / 2, FRAME_D.x + FRAME_D.w / 2], [FRAME_D.y - FRAME_D.h / 2, FRAME_D.y + FRAME_D.h / 2], [-MODULE_T, -LENS_T], M.steel);
+  const Z0 = -MODULE_T - LUG_H;            // lug faces = outer face of the 45° plate
+  for (const [x, y] of M3_HOLES) {
+    cyl(disp, 3, LUG_H, [x, y, -MODULE_T - LUG_H / 2], 'z', M.steel);   // M3 lug on the display
+    cyl(disp, 2.75, 2.4, [x, y, Z0 - P - 1.2], 'z', M.steel);            // M3 x 6 screw head inside the casing
+  }
+  for (const [x, y] of [[-29, -24.5], [29, -24.5], [-29, 24.5], [29, 24.5]]) {
+    cyl(disp, 2.5, LUG_H, [PI_C[0] + x, PI_C[1] + y, -MODULE_T - LUG_H / 2], 'z', M.steel); // M2.5 lug
+    cyl(disp, 2.5, 10, [PI_C[0] + x, PI_C[1] + y, Z0 - 5], 'z', M.brass);                  // standoff to the Pi
+  }
+  // Pi 4B, components facing away from the display; USB/Ethernet end to the left (front view)
+  const PIX = PI_C[0] - 10, PZ = Z0 - 10;
+  slab(disp, [PIX - 42.5, PIX + 42.5], [PI_C[1] - 28, PI_C[1] + 28], [PZ - 1.6, PZ], M.pcb);
+  slab(disp, [PIX - 42.5, PIX - 21.5], [PI_C[1] - 26, PI_C[1] + 26], [PZ - 17.6, PZ - 1.6], M.steel);  // USB + Ethernet
+  slab(disp, [PIX - 5, PIX + 10], [PI_C[1] - 7.5, PI_C[1] + 7.5], [PZ - 3, PZ - 1.6], M.foam);        // SoC
+  // the 45° plate: 4 M3 clearance holes + a window for the display driver board and the Pi
+  const plate = holedPlate(WI, HS * Math.SQRT2, P,
+    [...M3_HOLES.map(([x, y]) => [x, -y, 1.7]), [PIX, -PI_C[1], 85 + 12, 56 + 12]], 0, M.panel);
+  plate.rotation.x = Math.PI / 2; plate.position.z = Z0 - P;
+  disp.add(plate);
+  // self-check: the Pi's deepest corners stay inside the casing and clear of the fan
+  scene.updateMatrixWorld(true);
+  piFits = [-28, 28].flatMap(dy => [PZ - 17.6, PZ].map(z =>
+    unit.worldToLocal(disp.localToWorld(new THREE.Vector3(0, PI_C[1] + dy, z)))))
+    .every(p => p.y > P && p.y < HS - P && p.z > -HB + P + FAN_T);
+}
+
+// ---------- table + lights ----------
+const table = new THREE.Mesh(new THREE.PlaneGeometry(2600, 2600), M.table);
+table.rotation.x = -Math.PI / 2; table.position.set(0, -0.5, 350); scene.add(table);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8d939a, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+sun.position.set(700, 1500, 1000); sun.castShadow = true;
+Object.assign(sun.shadow.camera, { left: -1000, right: 1000, top: 1000, bottom: -1000, near: 100, far: 4000 });
+sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004;
+scene.add(sun);
+scene.traverse(o => { if (o.isMesh && !o.isInstancedMesh) { o.castShadow = o !== table; o.receiveShadow = true; } });
+
+// ---------- renderer, cameras, views ----------
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+scene.background = new THREE.Color(css('--scene'));
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => scene.background.set(css('--scene')));
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.getElementById('view').appendChild(renderer.domElement);
+const persp = new THREE.PerspectiveCamera(35, 1, 5, 20000);
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -10000, 10000);
+let cam = persp;
+const controls = new OrbitControls(persp, renderer.domElement);
+controls.enableDamping = true;
+let half = 560, view = 'iso';             // ortho half-height (mm) and current view
+function resize(offset = true) {
+  const w = innerWidth, h = innerHeight, ui = $('ui').getBoundingClientRect().right + 16;
+  const pw = offset && w - ui >= 200 ? ui : 0;   // centre the model in the space right of the control panel
+  const fw = w + pw, k = fw / h;
+  renderer.setSize(w, h);
+  persp.aspect = k;
+  Object.assign(ortho, { left: -half * k, right: half * k, top: half, bottom: -half });
+  for (const c of [persp, ortho]) { if (pw) c.setViewOffset(fw, h, 0, 0, w, h); else c.clearViewOffset(); c.updateProjectionMatrix(); }
+}
+const VIEWS = {
+  iso:   { cam: persp, pos: [1500, 1050, 1900], tgt: [0, 250, 280] },
+  front: { cam: ortho, pos: [0, 340, 3000], tgt: [0, 340, 0] },
+  side:  { cam: ortho, pos: [-3000, 340, 200], tgt: [0, 340, 200] },   // from the left, so the front is on the right
+  top:   { cam: ortho, pos: [0, 3000, 331], tgt: [0, 0, 330] },
+  camera: { cam: persp, pos: [150, 420, TRAY_Z + 320], tgt: [0, CAM_LENS_Y + 6, TRAY_Z] },  // looks up under the front top rail
+};
+// isolated display unit: same view directions, centred on the unit
+const UNIT_C = [0, HT + HS / 2, TRAY_Z];
+const UNIT_VIEWS = { iso: [330, 170, 400], front: [0, 0, 3000], side: [-3000, 0, 0], top: [0, 3000, 1] };
+function setUnitOnly(on) { $('unitOnly').checked = on; machine.visible = table.visible = !on; }
+function setView(name) {
+  if (name === 'camera') {                 // the camera lives in the main box, behind the panels
+    setUnitOnly(false);
+    if ($('panels').value === 'solid') { $('panels').value = 'ghost'; setPanels('ghost'); }
+  }
+  view = name;
+  const only = $('unitOnly').checked, v = VIEWS[name];
+  half = only ? 140 : 560;
+  cam = v.cam; cam.position.set(...(only ? add(UNIT_C, UNIT_VIEWS[name]) : v.pos));
+  ortho.zoom = 1; resize();
+  controls.object = cam; controls.target.set(...(only ? UNIT_C : v.tgt)); controls.update();
+  document.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', b.dataset.view === name));
+}
+
+// ---------- specs + self-checks ----------
+const lensToRim = CAM_LENS_Y - (BASE_TOP + LEDGE + TRAY_H);
+const viewZ = 2 * lensToRim * Math.tan(rad(CAM_VFOV / 2)), viewX = 2 * lensToRim * Math.tan(rad(CAM_HFOV / 2));
+const flippedFar = HINGE_Z + SLIDE_L + P + POCKET;
+const cut = {}; bars.forEach(L => { cut[L] = (cut[L] || 0) + 1; });
+const specs = [
+  `Outer box ${W + 2 * P} × ${D + 2 * P} × ${HT} mm, plus a ${HS} mm display unit on top`,
+  `Slotted angle cut list: ${Object.entries(cut).map(([L, n]) => `${n} × ${L}`).join(', ')} mm (≈ ${(bars.reduce((s, L) => s + L, 0) / 1000).toFixed(1)} m)`,
+  `Drawer slides: 2 × ${SLIDE_L} mm (14") full-extension, ${SLIDE_H} mm tall`,
+  `Camera lens ${lensToRim.toFixed(0)} mm above the tray rim, sees ≈ ${viewX.toFixed(0)} × ${viewZ.toFixed(0)} mm`,
+  `Pivot height ${BASE_TOP} mm = stacked trays, so the flipped stack lands on the table`,
+  `Clear table needed in front of the box: ${(flippedFar - (FRONT_Z + P)).toFixed(0)} mm`,
+  `LED cable from the back grommet: at least ${((DRW_Z0 + SLIDE_L) - (-D / 2 - P)).toFixed(0)} mm free length`,
+  `Tray height ${TRAY_H} mm is assumed: measure yours`,
+  `Display unit: ${HW} × ${HF + HB} × ${HS} mm casing; display on 4 × M3 × 6 screws (lug threads strip easily), ${FAN} mm fan`,
+];
+const checks = [
+  ['Camera sees the whole tray', viewX >= TRAY && viewZ >= TRAY],
+  ['Front opening clears the corner posts', OPEN_W <= W - 2 * A],
+  ['Drawer clears the bottom front rail', OPEN_Y0 > A],
+  ['Tray frame is fully out of the box before it can flip', HINGE_Z - P - POCKET + SLIDE_L > FRONT_Z + P],
+  ['Flipped lip plate misses the pull knobs', LIP_X < FACE_X - 15 - 8],
+  [`Camera ribbon fits a 150 mm cable (est. ${RIBBON_EST.toFixed(0)} mm)`, RIBBON_EST <= 150],
+  ['Display M3 holes 126.2 × 65.65 mm apart (official drawing)',
+    Math.abs(M3_HOLES[0][0] - M3_HOLES[1][0] - 126.2) < 0.01 && Math.abs(M3_HOLES[0][1] - M3_HOLES[2][1] - 65.65) < 0.01],
+  [`${FAN} mm fan fits the casing's back plate`, FAN + 4 <= HS - 2 * P],
+  ['Display glass fits the casing width', LENS_W <= HW],
+  ['Pi 4B fits inside the casing, clear of the fan', piFits],
+];
+const $ = id => document.getElementById(id);
+for (const s of specs) $('specs').append(Object.assign(document.createElement('li'), { textContent: s }));
+for (const [t, ok] of checks) {
+  console.assert(ok, t);
+  $('checks').append(Object.assign(document.createElement('li'), { textContent: `${ok ? '✓' : '✗'} ${t}`, className: ok ? 'ok' : 'bad' }));
+}
+
+// ---------- controls ----------
+function setLeds(on) {
+  M.led.emissiveIntensity = on ? 2.2 : 0;
+  for (const m of [M.duck, M.quail]) { m.emissive.set(on ? 0xff8a2e : 0x000000); m.emissiveIntensity = on ? 0.45 : 0; }
+}
+function setPanels(mode) {
+  M.panel.opacity = mode === 'solid' ? 1 : 0.2;
+  M.panel.depthWrite = mode === 'solid'; M.panel.needsUpdate = true;
+  scene.traverse(o => { if (o.material === M.panel) { o.visible = mode !== 'hidden'; o.castShadow = mode === 'solid'; } });
+}
+function update() {
+  const ext = $('drawer').value / 100 * SLIDE_L, deg = +$('flip').value;
+  drawer.position.z = ext; slideMid.position.z = ext / 2;
+  pivot.rotation.x = rad(deg);
+  lid.visible = $('lid').checked || deg > 0;
+  $('flip').disabled = ext < SLIDE_L;      // only flips once the frame is clear of the box
+  $('drawer').disabled = deg > 0;          // and the drawer can't close while flipped
+  $('drawerOut').value = `${ext.toFixed(0)} mm`;
+  $('flipOut').value = `${deg}°`;
+  $('hint').textContent = deg > 0 ? 'Flip back to 0° to close the drawer.'
+    : ext < SLIDE_L ? 'Pull the drawer fully out to flip.' : 'Put the lid tray on, then flip.';
+}
+['drawer', 'flip', 'lid'].forEach(id => $(id).addEventListener('input', update));
+$('leds').addEventListener('change', e => setLeds(e.target.checked));
+$('panels').addEventListener('change', e => setPanels(e.target.value));
+document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+addEventListener('resize', resize);
+$('save').addEventListener('click', () => {
+  resize(false);                 // saved image is centred, not shifted for the panel
+  renderer.render(scene, cam);   // read back in the same task, so no preserveDrawingBuffer needed
+  const a = document.createElement('a');
+  a.href = renderer.domElement.toDataURL('image/png');
+  a.download = `eggpoint-${$('unitOnly').checked ? 'pi-casing-' : ''}${view}.png`;
+  a.click();
+  resize();
+});
+$('unitOnly').addEventListener('change', e => { setUnitOnly(e.target.checked); setView(view === 'camera' ? 'iso' : view); });
+
+resize(); setLeds(true); setPanels('ghost'); setView('iso'); update();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, cam); });
+</script>
+</body>
+</html>
